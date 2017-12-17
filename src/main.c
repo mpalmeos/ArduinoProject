@@ -1,112 +1,154 @@
-#define BLINK_DELAY_MS 500
-#include <avr/pgmspace.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <avr/io.h>
+#include <avr/pgmspace.h>
+#include <avr/interrupt.h>
 #include <util/delay.h>
-#include "uart.h"
+#include <util/atomic.h>
+#include <stdlib.h> // stdlib is needed to use ltoa() - Long to ASCII
 #include "hmi_msg.h"
 #include "print_helper.h"
+#include "cli_microrl.h"
 #include "../lib/hd44780_111/hd44780.h"
+#include "../lib/andygock_avr-uart/uart.h"
+#include "../lib/helius_microrl/microrl.h"
+
+#define UART_BAUD 9600
+#define UART_STATUS_MASK 0x00FF
+
+#define BLINK_DELAY_MS 900
+#define LED_RED PORTA0 //Arduino Mega digital pin 22
+
+/* Define counter scale here */
+#define COUNT_SECONDS // seconds
+
+/* Uncomment to get ASCII print. Otherwise bytes are sent */
+#define ASCII_PRINT
+#ifdef ASCII_PRINT
+#endif //ASCII_PRINT
+
+volatile uint32_t counter_1; // Global seconds counter
+uint32_t prev_time = 0; // Heartbeat place holders
+uint32_t now = 0;
+
+// Create microrl object and pointer on it
+static microrl_t rl;
+static microrl_t *prl = &rl;
 
 
 static inline void init_leds(void)
 {
-    //Set port A pins 22, 24 and 26 as output.
-    DDRA = 0x15;
-    //Set port B pin 7 as output (onboard yellow LED)
-    DDRB |= _BV(DDB7);
+    //Set pin 22 of PORTA for output and set to low
+    DDRA |= _BV(LED_RED);
+    PORTA &= ~_BV(LED_RED);
 }
 
 
-//Init console as stderr in UART1 and print user code info; init UART0 for later
+static inline void init_sys_timer(void)
+{
+    // Set counter to random number 0x19D5F539 in HEX. Set it to 0 if you want
+    counter_1 = 0;
+    //Clear control registers
+    TCCR1A = 0;
+    TCCR1B = 0;
+    // Turn on CTC (Clear Timer on Compare)
+    TCCR1B |= _BV(WGM12);
+#ifdef COUNT_SECONDS
+    TCCR1B |= _BV(CS12); // fCPU/256
+    OCR1A = 62549; // 1 s. Note that it is actually two registers OCR5AH and OCR5AL
+#endif // COUNT_SECONDS
+    // Output Compare A Match Interrupt Enable
+    TIMSK1 |= _BV(OCIE1A);
+}
+
+
+// Initalise LCD screen and make sure it is empty
+static inline void init_lcd(void)
+{
+    lcd_init();
+    lcd_clrscr();
+}
+
+
+//Init system timer, LED pin, UART0, UART1, LCD and allow interruptions
 static inline void init_con(void)
 {
-    simple_uart0_init();
-    simple_uart1_init();
-    stdout = stdin = &simple_uart0_io;
-    stderr = &simple_uart1_out;
-    /* Print version info to UART1 */
-    fprintf_P(stderr, PSTR(CUR_VERSION), PSTR(FW_VERSION), PSTR(__DATE__),
-              PSTR(__TIME__));
-    fprintf_P(stderr, PSTR(AVR_VERSION), PSTR(__AVR_LIBC_VERSION_STRING__),
-              PSTR(__VERSION__));
-    /* Print student's name to UART0 */
-    fprintf_P(stdout, PSTR(MY_NAME));
-    fprintf(stdout, "\n");
+    //Start system timer
+    init_sys_timer();
+    //Initialize LED
+    init_leds();
+    //Initialize and define UARTs
+    uart0_init(UART_BAUD_SELECT(UART_BAUD, F_CPU));
+    uart1_init(UART_BAUD_SELECT(UART_BAUD, F_CPU));
+    //Initialize LCD screen
+    init_lcd();
+    //Enable the use of interrupts
+    sei();
 }
 
 
-static inline void blink_leds(void)
+static inline void print_start_msg(void)
 {
-    /*Set port B pin 7 output to low to turn onboard LED off*/
-    PORTB &= ~_BV(PORTB7);
-    /*Set port A pin 22 to high to turn red LED on, wait and
-    then turn it to low to turn it off*/
-    PORTA |= _BV(PORTA0);
-    _delay_ms(BLINK_DELAY_MS);
-    PORTA &= ~ _BV(PORTA0);
-    /*Set port A pin 22 to high to turn green LED on, wait and
-    then turn it to low to turn it off*/
-    PORTA |= _BV(PORTA2);
-    _delay_ms(BLINK_DELAY_MS);
-    PORTA &= ~ _BV(PORTA2);
-    /*Set port A pin 22 to high to turn blue LED on, wait and
-    then turn it to low to turn it off*/
-    PORTA |= _BV(PORTA4);
-    _delay_ms(BLINK_DELAY_MS);
-    PORTA &= ~ _BV(PORTA4);
+    /* Print message and version info to UART1 */
+    uart1_puts_p(PSTR("Console started\r\n"));
+    uart1_puts_p(PSTR(VER_FW));
+    uart1_puts_p(PSTR(VER_LIBC));
+    /* Print student's name to UART0 */
+    uart0_puts_p(PSTR(MY_NAME "\r\n"));
+    uart0_puts_p(PSTR("Use backspace to delete entry and enter to confirm.\r\n"));
+    uart0_puts_p(PSTR("Arrow keys and del doesn't work currently.\r\n"));
+    /* Write student's name on LCD screen */
+    lcd_puts_P(PSTR(MY_NAME));
 }
 
+
+static inline void heartbeat(void)
+{
+#ifdef ASCII_PRINT
+    char print_buf[11] = {0x00}; // Buffer large enough to hold all long (uint32_t) digits
+#endif //ASCII_PRINT
+    ATOMIC_BLOCK(ATOMIC_FORCEON) {
+        now = counter_1;
+    }
+
+    if (prev_time != now) {
+        ltoa(now, print_buf, 10); //convert integer to string
+        uart1_puts_p(PSTR("Uptime: "));
+        uart1_puts(print_buf);
+        uart1_puts_p(PSTR(" s.\r\n"));
+        PORTA ^= _BV(LED_RED); //Toggle LED
+        ATOMIC_BLOCK(ATOMIC_FORCEON) {
+            prev_time = now;
+        }
+    }
+}
+
+
+static inline void microrl_initialize(void)
+{
+    //Call init with ptr to microrl instance and print callback
+    microrl_init(prl, uart0_puts);
+    //Set callback for execute
+    microrl_set_execute_callback(prl, cli_execute);
+}
 
 void main (void)
 {
-    /* Blink LEDs */
-    blink_leds();
-    /* Initialise LEDs */
-    init_leds();
-    /* Initialise console */
+    /* Initialise console, microrl and print start info */
     init_con();
-    /*Initialise LCD screen */
-    lcd_init();
-    /* Make sure LCD screen is clean */
-    lcd_clrscr();
-    /* Write student's name on LCD screen */
-    lcd_puts_P(PSTR(MY_NAME));
-    /* Get ASCII table values */
-    unsigned char ascii[128] = {0};
-
-    for (unsigned char i = 0; i < sizeof(ascii); i++) {
-        ascii[i] = i;
-    }
-
-    /* Write out ACII table and, using the array, print ACII that is readable for humans */
-    fprintf(stdout, "\n");
-    print_ascii_tbl(stdout);
-    fprintf(stdout, "\n");
-    print_for_human(stdout, ascii, sizeof(ascii) - 1);
+    microrl_initialize();
+    print_start_msg();
 
     while (1) {
-        /* Print text, read input and print response to input */
-        char input[20];
-        fprintf_P(stdout, PSTR(GET_NUMBER_MSG));
-        scanf("%s", input);
-        fprintf(stdout, input);
-        /* Turn input string into Integer (any non-digits will be read as zero) */
-        int in_int = atoi(input);
-        /* Go to next line on LCD screen */
-        lcd_goto(0x40);
-
-        /* Error Control: prints text from table, if Integer is between 0 and 9, and gives error, if number is higher/lower */
-        if (in_int >= 0 && in_int < 10) {
-            fprintf_P(stdout, PSTR(GIVE_NUMBER_MSG));
-            fprintf_P(stdout, numbers[in_int]);
-            lcd_puts_P(numbers[in_int]);
-            lcd_putc(' ');
-        } else {
-            fprintf_P(stdout, PSTR(NOT_NUMBER_MSG));
-        }
-
-        lcd_puts_P(PSTR("                 ")); //Clear the end of the line on the screen
+        //Print Uptime in UART0
+        heartbeat();
+        //Get input from user via commandline and execute the commands
+        microrl_insert_char(prl, (uart0_getc() & UART_STATUS_MASK));
     }
+}
+
+/* Counter 1 ISR */
+ISR(TIMER1_COMPA_vect)
+{
+    counter_1++;
 }

@@ -2,12 +2,10 @@
 #ifndef HMI_MSG_H
 #define HMI_MSG_H
 
-#define CUR_VERSION "Version: %S built on: %S %S\n"
-#define AVR_VERSION "avr-libc version: %S avr-gcc version: %S\n"
+#define VER_FW "Version: " FW_VERSION " built on: " __DATE__ " " __TIME__ "\r\n"
+#define VER_LIBC "avr-libc version: " __AVR_LIBC_VERSION_STRING__ " avr-gcc version: " __VERSION__ "\r\n"
 #define MY_NAME "Maie Palmeos"
-#define GET_NUMBER_MSG "\nPlease enter a number >"
-#define GIVE_NUMBER_MSG "\nYou entered number "
-#define NOT_NUMBER_MSG "\nPlease enter a number between 0 and 9"
-const char numbers[10][6] PROGMEM = {"Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"};
+
+extern PGM_P const numbers[];
 
 #endif /*HMI_MSG_H */
