@@ -12,24 +12,18 @@
 #include "../lib/hd44780_111/hd44780.h"
 #include "../lib/andygock_avr-uart/uart.h"
 #include "../lib/helius_microrl/microrl.h"
+#include "../lib/andy_brown_memdebug/memdebug.h"
+#include "../lib/matejx_avr_lib/mfrc522.h"
+#include "rfid.h"
 
 #define UART_BAUD 9600
 #define UART_STATUS_MASK 0x00FF
 
-#define BLINK_DELAY_MS 900
-#define LED_RED PORTA0 //Arduino Mega digital pin 22
-
-/* Define counter scale here */
-#define COUNT_SECONDS // seconds
-
-/* Uncomment to get ASCII print. Otherwise bytes are sent */
-#define ASCII_PRINT
-#ifdef ASCII_PRINT
-#endif //ASCII_PRINT
+//#define BLINK_DELAY_MS 2000
+#define LED_RED PORTA0 //Arduino Mega digital pin 22 for heartbeat
+#define LED_BLU PORTA4 //Arduino Mega digital pin 26 for door lock
 
 volatile uint32_t counter_1; // Global seconds counter
-uint32_t prev_time = 0; // Heartbeat place holders
-uint32_t now = 0;
 
 // Create microrl object and pointer on it
 static microrl_t rl;
@@ -38,9 +32,11 @@ static microrl_t *prl = &rl;
 
 static inline void init_leds(void)
 {
-    //Set pin 22 of PORTA for output and set to low
+    //Set pin of PORTA for output and set to low
     DDRA |= _BV(LED_RED);
+    DDRA |= _BV(LED_BLU);
     PORTA &= ~_BV(LED_RED);
+    PORTA &= ~_BV(LED_BLU);
 }
 
 
@@ -53,10 +49,8 @@ static inline void init_sys_timer(void)
     TCCR1B = 0;
     // Turn on CTC (Clear Timer on Compare)
     TCCR1B |= _BV(WGM12);
-#ifdef COUNT_SECONDS
     TCCR1B |= _BV(CS12); // fCPU/256
     OCR1A = 62549; // 1 s. Note that it is actually two registers OCR5AH and OCR5AL
-#endif // COUNT_SECONDS
     // Output Compare A Match Interrupt Enable
     TIMSK1 |= _BV(OCIE1A);
 }
@@ -87,6 +81,14 @@ static inline void init_con(void)
 }
 
 
+static inline void init_rfid_reader(void)
+{
+    /* Init RFID-RC522 */
+    MFRC522_init();
+    PCD_Init();
+}
+
+
 static inline void print_start_msg(void)
 {
     /* Print message and version info to UART1 */
@@ -102,14 +104,21 @@ static inline void print_start_msg(void)
 }
 
 
+static inline uint32_t get_time(void)
+{
+    uint8_t time_now = 0;
+    ATOMIC_BLOCK(ATOMIC_FORCEON) {
+        time_now = counter_1;
+    }
+    return time_now;
+}
+
+
 static inline void heartbeat(void)
 {
-#ifdef ASCII_PRINT
+    static uint32_t prev_time;
+    uint32_t now = get_time();
     char print_buf[11] = {0x00}; // Buffer large enough to hold all long (uint32_t) digits
-#endif //ASCII_PRINT
-    ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        now = counter_1;
-    }
 
     if (prev_time != now) {
         ltoa(now, print_buf, 10); //convert integer to string
@@ -132,18 +141,123 @@ static inline void microrl_initialize(void)
     microrl_set_execute_callback(prl, cli_execute);
 }
 
+
+void door_and_disp_handler(void)
+{
+    door_state_t door_state;
+    display_state_t display_state;
+    Uid uid;
+    Uid *uid_ptr = &uid;
+    uint8_t current_time = get_time();
+    card_t *card_beep;
+    static uint32_t message_start;
+    static uint32_t door_open_start;
+    char lcd_buf[256];
+    byte bufferATQA[10];
+    byte buffersize = sizeof(bufferATQA);
+    byte result;
+    
+    if (PICC_IsNewCardPresent()) {
+        result = PICC_WakeupA(bufferATQA, &buffersize);
+        if (result != STATUS_OK){
+        PICC_ReadCardSerial(uid_ptr);
+        card_beep->size = uid.size;
+        memcpy(card_beep->uid, uid.uidByte, uid.size);
+        //card_beep->holder = NULL;
+        card_t *card_found = rfid_card_finder(card_beep);
+
+        if (card_found) {
+            door_state = door_opening;
+            display_state = display_name;
+        } else {
+            door_state = door_closed;
+            display_state = display_access_denied;
+        }
+        }
+    } else {
+        return;
+    }
+
+    switch (door_state) {
+    case door_opening:
+        //Document door open time
+        door_open_start = current_time;
+        //Unlock door
+        door_state = door_open;
+        break;
+
+    case door_open:
+        if ((door_open_start + 2) < current_time) {
+            door_state = door_closing;
+        }
+
+        //Open door
+        PORTA |= _BV(LED_BLU);
+        break;
+
+    case door_closing:
+        //Lock door
+        door_state = door_closed;
+        display_state = display_clear;
+        PORTA &= _BV(LED_BLU);
+        break;
+
+    case door_closed:
+        break; // No need to do anything
+    }
+
+    switch (display_state) {
+    case display_access_denied:
+        lcd_clr(LCD_ROW_2_START, LCD_VISIBLE_COLS);
+        lcd_goto(LCD_ROW_2_START);
+        lcd_puts_P(PSTR("Access denied!"));
+        message_start = current_time;
+        display_state = display_clear;
+        break;
+
+    case display_clear:
+        if ((message_start + 5) < current_time) {
+            lcd_clr(LCD_ROW_2_START, LCD_VISIBLE_COLS);
+            display_state = display_no_update;
+        }
+        lcd_clr(LCD_ROW_2_START, LCD_VISIBLE_COLS);
+        break;
+
+    case display_name:
+        lcd_clr(LCD_ROW_2_START, LCD_VISIBLE_COLS);
+        lcd_goto(LCD_ROW_2_START);
+
+        if (card_beep->holder != NULL) {
+            strncpy(lcd_buf, card_beep->holder, LCD_VISIBLE_COLS);
+            lcd_puts(lcd_buf);
+        } else {
+            lcd_puts_P(PSTR("Name read error"));
+        }
+
+        message_start = current_time;
+        display_state = display_clear;
+        break;
+
+    case display_no_update:
+        break;
+    }
+}
+
+
 void main (void)
 {
     /* Initialise console, microrl and print start info */
     init_con();
-    microrl_initialize();
     print_start_msg();
+    microrl_initialize();
+    init_rfid_reader();
 
     while (1) {
         //Print Uptime in UART0
         heartbeat();
         //Get input from user via commandline and execute the commands
         microrl_insert_char(prl, (uart0_getc() & UART_STATUS_MASK));
+        door_and_disp_handler();
     }
 }
 

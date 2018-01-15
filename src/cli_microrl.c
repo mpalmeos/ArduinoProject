@@ -6,9 +6,12 @@
 #include "../lib/hd44780_111/hd44780.h"
 #include "../lib/andygock_avr-uart/uart.h"
 #include "../lib/helius_microrl/microrl.h"
+#include "../lib/andy_brown_memdebug/memdebug.h"
+#include "../lib/matejx_avr_lib/mfrc522.h"
 #include "hmi_msg.h"
 #include "print_helper.h"
 #include "cli_microrl.h"
+#include "rfid.h"
 
 #define NUM_ELEMS(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -19,6 +22,11 @@ void cli_print_ascii_tbls(const char *const *argv);
 void cli_handle_number(const char *const *argv);
 void cli_print_cmd_error(void);
 void cli_print_cmd_arg_error(void);
+void cli_rfid_read(const char *const *argv);
+void cli_rfid_print(const char *const *argv);
+void cli_rfid_add(const char *const *argv);
+void cli_rfid_rm(const char *const *argv);
+void cli_mem_stat(const char *const *argv);
 
 
 typedef struct cli_cmd {
@@ -41,6 +49,19 @@ const char ascii_help[] PROGMEM = "Print ASCII tables";
 const char number_cmd[] PROGMEM = "number";
 const char number_help[] PROGMEM =
     "Print and display matching number. Usage: number <number>";
+const char read_cmd[] PROGMEM = "read";
+const char read_help[] PROGMEM = "Read Mifare card and print Card UID";
+const char print_cmd[] PROGMEM = "print";
+const char print_help[] PROGMEM = "Print stored access card list";
+const char add_cmd[] PROGMEM = "add";
+const char add_help[] PROGMEM =
+    "Add Mifare card to list. Usage: add <card uid in HEX> <card holder name>";
+const char rm_cmd[] PROGMEM = "rm";
+const char rm_help[] PROGMEM =
+    "Remove Mifare card from list. Usage: rm <card uid in HEX>";
+const char mem_cmd[] PROGMEM = "mem";
+const char mem_help[] PROGMEM =
+    "Print memory usage and change compared to previous call";
 
 
 const cli_cmd_t cli_cmds[] = {
@@ -48,7 +69,12 @@ const cli_cmd_t cli_cmds[] = {
     {ver_cmd, ver_help, cli_print_ver, 0},
     {example_cmd, example_help, cli_example, 3},
     {ascii_cmd, ascii_help, cli_print_ascii_tbls, 0},
-    {number_cmd, number_help, cli_handle_number, 1}
+    {number_cmd, number_help, cli_handle_number, 1},
+    {read_cmd, read_help, cli_rfid_read, 0},
+    {print_cmd, print_help, cli_rfid_print, 0},
+    {add_cmd, add_help, cli_rfid_add, 2},
+    {rm_cmd, rm_help, cli_rfid_rm, 1},
+    {mem_cmd, mem_help, cli_mem_stat, 0}
 };
 
 
@@ -105,6 +131,9 @@ void cli_handle_number(const char *const *argv)
     for (size_t i = 0; i < strlen(argv[1]); i++) {
         if (!isdigit(argv[1][i])) {
             uart0_puts_p(PSTR("Argument is not a decimal number!\r\n"));
+            lcd_clr(64, 16);
+            lcd_goto(LCD_ROW_2_START);
+            lcd_puts_P(PSTR("Not a number!"));
             return;
         }
     }
@@ -116,15 +145,54 @@ void cli_handle_number(const char *const *argv)
         uart0_puts_p(PSTR("You entered number "));
         uart0_puts_p((PGM_P)pgm_read_word(&numbers[input]));
         uart0_puts_p(PSTR("\r\n"));
-        lcd_goto(0x40);
+        lcd_clr(LCD_ROW_2_START, LCD_VISIBLE_COLS); // Clear screen before next message
+        lcd_goto(LCD_ROW_2_START); //Go to LCD screen row 2
         lcd_puts_P((PGM_P)pgm_read_word(&numbers[input]));
-        lcd_putc(' ');
-        lcd_puts_P(PSTR("                 ")); //Clear the end of the line on the screen
         return;
     } else {
         uart0_puts_p(PSTR("Please enter a number between 0 and 9!\r\n"));
+        lcd_clr(LCD_ROW_2_START, LCD_VISIBLE_COLS); // Clear screen before next message
+        lcd_goto(LCD_ROW_2_START); //Go to LCD screen row 2
+        lcd_puts_P(PSTR("Enter 0-9!"));
         return;
     }
+}
+
+
+void cli_mem_stat(const char *const *argv)
+{
+    (void) argv;
+    char print_buf[256] = {0x00};
+    extern int __heap_start, *__brkval;
+    int v;
+    int space;
+    static int prev_space;
+    space = (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
+    uart0_puts_p(PSTR("Heap statistics\r\n"));
+    sprintf_P(print_buf, PSTR("Used: %u\r\nFree: %u\r\n"), getMemoryUsed(),
+              getFreeMemory());
+    uart0_puts(print_buf);
+    uart0_puts_p(PSTR("\r\nSpace between stack and heap:\r\n"));
+    sprintf_P(print_buf, PSTR("Current  %d\r\nPrevious %d\r\nChange   %d\r\n"),
+              space, prev_space, space - prev_space);
+    uart0_puts(print_buf);
+    uart0_puts_p(PSTR("\r\nFreelist\r\n"));
+    sprintf_P(print_buf, PSTR("Freelist size:             %u\r\n"),
+              getFreeListSize());
+    uart0_puts(print_buf);
+    sprintf_P(print_buf, PSTR("Blocks in freelist:        %u\r\n"),
+              getNumberOfBlocksInFreeList());
+    uart0_puts(print_buf);
+    sprintf_P(print_buf, PSTR("Largest block in freelist: %u\r\n"),
+              getLargestBlockInFreeList());
+    uart0_puts(print_buf);
+    sprintf_P(print_buf, PSTR("Largest freelist block:    %u\r\n"),
+              getLargestAvailableMemoryBlock());
+    uart0_puts(print_buf);
+    sprintf_P(print_buf, PSTR("Largest allocable block:   %u\r\n"),
+              getLargestNonFreeListBlock());
+    uart0_puts(print_buf);
+    prev_space = space;
 }
 
 
