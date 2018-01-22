@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <avr/pgmspace.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../lib/andygock_avr-uart/uart.h"
 
@@ -31,10 +32,13 @@ void print_for_human(const unsigned char *array, const size_t len)
 }
 
 
-void print_bytes_for_human(const uint8_t bite)
+void print_bytes_for_human(const uint8_t *bite_array, const size_t arr_len)
 {
-    uart0_putc((bite >> 4) + ((bite >> 4) <= 9 ? 0x30 : 0x37));
-    uart0_putc((bite & 0x0F) + ((bite & 0x0F) <= 9 ? 0x30 : 0x37));
+    for (size_t i = 0; i < arr_len; i++) {
+        uart0_putc((bite_array[i] >> 4) + ((bite_array[i] >> 4) <= 9 ? 0x30 : 0x37));
+        uart0_putc((bite_array[i] & 0x0F) + ((bite_array[i] & 0x0F) <= 9 ? 0x30 :
+                                             0x37));
+    }
 }
 
 //https://stackoverflow.com/questions/3408706/hexadecimal-string-to-byte-array-in-c/23898449#23898449
